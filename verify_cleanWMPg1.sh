@@ -3,9 +3,7 @@
 set -e
 
 DEPLOY_ROOT=/root/cleanWMPg1
-export PATH=/opt/miniconda3_r2wmp/bin:$PATH
-source /opt/miniconda3_r2wmp/etc/profile.d/conda.sh
-conda activate cleanwmpg1
+export PATH=/opt/miniconda3_r2wmp/envs/cleanwmpg1/bin:/opt/miniconda3_r2wmp/bin:$PATH
 # WMP has no setup.py; we use PYTHONPATH directly.
 export PYTHONPATH=$DEPLOY_ROOT:$DEPLOY_ROOT/legged_gym:$DEPLOY_ROOT/rsl_rl:/home/WMP:$PYTHONPATH
 export LEGGED_GYM_ROOT_DIR=$DEPLOY_ROOT/legged_gym
