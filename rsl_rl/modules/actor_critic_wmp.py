@@ -32,6 +32,7 @@
 # All Bytedance's Modifications are Copyright (year) Bytedance Ltd. and/or its affiliates.
 
 import numpy as np
+import os
 
 import torch
 import torch.nn as nn

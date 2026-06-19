@@ -228,7 +228,7 @@ class RSSM(nn.Module):
         if sample:
             stoch = self.get_dist(stats).sample()
         else:
-            stoch = self.get_dist(stats).mode()
+            stoch = self.get_dist(stats).mean
         post = {"stoch": stoch, "deter": prior["deter"], **stats}
         return post, prior
 
@@ -255,7 +255,7 @@ class RSSM(nn.Module):
         if sample:
             stoch = self.get_dist(stats).sample()
         else:
-            stoch = self.get_dist(stats).mode()
+            stoch = self.get_dist(stats).mean
         prior = {"stoch": stoch, "deter": deter, **stats}
         return prior
 
@@ -263,7 +263,7 @@ class RSSM(nn.Module):
         x = self._img_out_layers(deter)
         stats = self._suff_stats_layer("ims", x)
         dist = self.get_dist(stats)
-        return dist.mode()
+        return dist.mean
 
     def _suff_stats_layer(self, name, x):
         if self._discrete:

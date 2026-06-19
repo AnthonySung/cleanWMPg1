@@ -46,6 +46,10 @@ class LeggedRobotCfg(BaseConfig):
         send_timeouts = True # send time out information to the algorithm
         episode_length_s = 20 # episode length in seconds
         reference_state_initialization = False # initialize state from reference data
+        # cleanWMPg1: AMP discriminator is enabled by default; plain PPO tasks
+        # (e.g. WMP-g1's `g1` task without imitation) should set use_amp=False in
+        # their child config. WMP upstream hardcoded AMP on, so we default to True.
+        use_amp = True
 
     class terrain:
         mesh_type = 'trimesh' # "heightfield" # none, plane, heightfield or trimesh
@@ -60,6 +64,13 @@ class LeggedRobotCfg(BaseConfig):
         measure_heights = True
         measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] # 1mx1.6m rectangle (without center line)
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
+        # cleanWMPg1: forward depth-camera sampling grid (WMP uses these for the
+        # depth predictor; parent config did not declare them, AMP configs override).
+        measured_forward_points_x = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+                                     1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0]
+        measured_forward_points_y = [-1.2, -1.1, -1.0, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4,
+                                     -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6,
+                                     0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
         selected = False # select a unique terrain type and pass all arguments
         terrain_kwargs = None # Dict of arguments for selected terrain
         max_init_terrain_level = 0 # starting curriculum state
@@ -139,6 +150,8 @@ class LeggedRobotCfg(BaseConfig):
         self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
         replace_cylinder_with_capsule = True # replace collision cylinders with capsules, leads to faster/more stable simulation
         flip_visual_attachments = True # Some .obj meshes must be flipped from y-up to z-up
+        # cleanWMPg1: number of force sensors in URDF (0 if none; upstream hardcoded 4 for A1).
+        num_force_sensors = 4
         
         density = 0.001
         angular_damping = 0.
@@ -160,6 +173,12 @@ class LeggedRobotCfg(BaseConfig):
         link_mass_range = [0.8, 1.2]
         randomize_com_pos = True
         com_pos_range = [-0.05, 0.05]
+        # cleanWMPg1: per-axis COM randomization ranges (WMP legged_robot.py
+        # uses com_x_pos_range / com_y_pos_range / com_z_pos_range, but the
+        # upstream LeggedRobotCfg only defines a single com_pos_range).
+        com_x_pos_range = [-0.05, 0.05]
+        com_y_pos_range = [-0.05, 0.05]
+        com_z_pos_range = [-0.05, 0.05]
 
         push_robots = True
         push_interval_s = 15
@@ -177,7 +196,11 @@ class LeggedRobotCfg(BaseConfig):
     class rewards:
         reward_curriculum = True
         reward_curriculum_term = ["lin_vel_z"]
-        reward_curriculum_schedule = [0, 1000, 1, 0]  #from iter 0 to iter 1000, decrease from 1 to 0
+        # cleanWMPg1: each schedule is a list of 4 numbers (start_iter, end_iter,
+        # coef_low, coef_high). WMP upstream had [0, 1000, 1, 0] which is a single
+        # 4-tuple, not a list-of-schedules — that breaks the comprehension in
+        # LeggedRobot.__init__ (line 130: schedule[2]). Use the correct shape.
+        reward_curriculum_schedule = [[0, 1000, 1.0, 0.0]]
         class scales:
             termination = -0.0
             tracking_lin_vel = 1.0
@@ -197,6 +220,13 @@ class LeggedRobotCfg(BaseConfig):
 
         only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
         tracking_sigma = 0.15 # tracking reward = exp(-error^2/sigma)
+        # cleanWMPg1: WMP's AMP configs reference lin_vel_clip / foot_height_target /
+        # base_height_target / default_gap which the upstream parent did not declare.
+        # Adding sane defaults here so plain PPO tasks also work.
+        lin_vel_clip = 0.1
+        foot_height_target = 0.15
+        base_height_target = 0.3
+        default_gap = 0.28
         soft_dof_pos_limit = 1. # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.
         soft_torque_limit = 1.

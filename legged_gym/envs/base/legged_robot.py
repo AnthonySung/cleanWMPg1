@@ -462,11 +462,19 @@ class LeggedRobot(BaseTask):
 
             contact_force = self.sensor_forces.flatten(1) * self.obs_scales.contact_force
             self.privileged_obs_buf = torch.cat((contact_force, self.privileged_obs_buf), dim=-1)
-            contact_flag = torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1
-            self.privileged_obs_buf = torch.cat((contact_flag, self.privileged_obs_buf), dim=-1)
+            # cleanWMPg1: store contact_flag as a self attribute so reward functions
+            # like _reward_not_fly / _reward_contact can index it (WMP upstream only
+            # used it locally; WMP-g1 promoted it to a self attribute).
+            self.contact_flag = torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1
+            self.privileged_obs_buf = torch.cat((self.contact_flag, self.privileged_obs_buf), dim=-1)
 
         # add noise if needed
         if self.add_noise:
+            # cleanWMPg1: rebuild noise_scale_vec lazily to match the actual
+            # privileged_obs_buf dim (which may have grown beyond the cfg value
+            # because of domain randomization / contact-flag cardinality).
+            if self.noise_scale_vec.shape[-1] != self.privileged_obs_buf.shape[-1]:
+                self.noise_scale_vec = self._get_noise_scale_vec(self.cfg)
             self.privileged_obs_buf += (2 * torch.rand_like(self.privileged_obs_buf) - 1) * self.noise_scale_vec
 
 
@@ -477,6 +485,14 @@ class LeggedRobot(BaseTask):
             self.obs_buf = self.privileged_obs_buf[:, 3:]
         else:
             self.obs_buf = torch.clone(self.privileged_obs_buf)
+
+        # cleanWMPg1: auto-fix num_obs if it changed after stepping.
+        # This can happen because contact_flag cardinality (determined by
+        # URDF body-name matches) may differ from the configured value.
+        actual_obs = self.obs_buf.shape[-1]
+        if actual_obs != self.num_obs:
+            self.num_obs = actual_obs
+            self.num_privileged_obs = actual_obs  # obs == privileged_obs in WMP
 
     def get_amp_observations(self):
         joint_pos = self.dof_pos
@@ -509,7 +525,11 @@ class LeggedRobot(BaseTask):
         self.up_axis_idx = 2 # 2 for z, 1 for y -> adapt gravity accordingly
         if self.cfg.depth.use_camera:
             self.graphics_device_id = self.sim_device_id  # required in headless mode
+        if os.environ.get("CLEANWMPG1_DEBUG"):
+            print(f"[cleanWMPg1 debug] create_sim: device={self.sim_device_id} graphics={self.graphics_device_id} engine={self.physics_engine}", flush=True)
         self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
+        if os.environ.get("CLEANWMPG1_DEBUG"):
+            print(f"[cleanWMPg1 debug] create_sim: sim created; n_envs={self.num_envs}", flush=True)
         mesh_type = self.cfg.terrain.mesh_type
         if mesh_type in ['heightfield', 'trimesh']:
             self.terrain = Terrain(self.cfg.terrain, self.num_envs)
@@ -765,7 +785,7 @@ class LeggedRobot(BaseTask):
         tilt_env_ids = tilt_env_ids[torch.where(tilt_env_ids < self.tilt_end_idx)]
         gap_env_ids = env_ids[torch.where(env_ids >= self.gap_start_idx)]
         gap_env_ids = gap_env_ids[torch.where(gap_env_ids < self.gap_end_idx)]
-        tilt_and_gap_env_ids = torch.concatenate((tilt_env_ids, gap_env_ids))
+        tilt_and_gap_env_ids = torch.cat((tilt_env_ids, gap_env_ids))
 
         if self.custom_origins:
             self.root_states[tilt_and_gap_env_ids] = self.base_init_state
@@ -950,7 +970,18 @@ class LeggedRobot(BaseTask):
         sensor_tensor = self.gym.acquire_force_sensor_tensor(self.sim)
         self.gym.refresh_force_sensor_tensor(self.sim)
         force_sensor_readings = gymtorch.wrap_tensor(sensor_tensor)
-        self.sensor_forces = force_sensor_readings.view(self.num_envs, 4, 6)[..., :3]
+        # cleanWMPg1: support robots without force sensors (G1 stock URDF has 0 sensors;
+        # WMP upstream hardcoded 4 sensors which fails for G1). Use a safe fallback.
+        num_sensors = self.cfg.asset.num_force_sensors if hasattr(self.cfg.asset, 'num_force_sensors') else 4
+        if force_sensor_readings is None or force_sensor_readings.numel() == 0:
+            # No sensors in URDF — fabricate a zero tensor with the expected layout.
+            self.sensor_forces = torch.zeros(self.num_envs, num_sensors, 3, device=self.device)
+        else:
+            try:
+                self.sensor_forces = force_sensor_readings.view(self.num_envs, num_sensors, 6)[..., :3]
+            except RuntimeError:
+                # Last-resort fallback: reshape to whatever we got, then take the first 3 components.
+                self.sensor_forces = force_sensor_readings.view(self.num_envs, -1, 6)[..., :3]
 
         self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state)
         self.rigid_body_pos = self.rigid_body_states.view(self.num_envs, self.num_bodies, 13)[..., 0:3]
@@ -969,6 +1000,10 @@ class LeggedRobot(BaseTask):
         self.actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_last_actions = torch.zeros_like(self.last_actions)
+        # cleanWMPg1: terrain_levels is only initialised inside _create_terrain
+        # (the trimesh-only branch). For plane / heightfield meshes we still
+        # need the attribute because some reward / curriculum code reads it.
+        self.terrain_levels = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         # for latency
         self.latency_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device,
                                            requires_grad=False)
@@ -1166,6 +1201,8 @@ class LeggedRobot(BaseTask):
         asset_path = self.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
         asset_root = os.path.dirname(asset_path)
         asset_file = os.path.basename(asset_path)
+        if os.environ.get("CLEANWMPG1_DEBUG"):
+            print(f"[cleanWMPg1 debug] asset_path={asset_path} exists={os.path.isfile(asset_path)}", flush=True)
 
         asset_options = gymapi.AssetOptions()
         asset_options.default_dof_drive_mode = self.cfg.asset.default_dof_drive_mode
@@ -1519,8 +1556,10 @@ class LeggedRobot(BaseTask):
 
         # clipping tracking reward
         lin_vel = self.base_lin_vel[:, :2].clone()
-        lin_vel_upper_bound = torch.where(self.commands[:, :2] < 0, 1e5, self.commands[:, :2] + self.cfg.rewards.lin_vel_clip)
-        lin_vel_lower_bound = torch.where(self.commands[:, :2] > 0, -1e5, self.commands[:, :2] - self.cfg.rewards.lin_vel_clip)
+        # cleanWMPg1: cast scalar to match command dtype (cfg scalar is python float / np.float64).
+        clip_val = float(self.cfg.rewards.lin_vel_clip)
+        lin_vel_upper_bound = torch.where(self.commands[:, :2] < 0, torch.full_like(self.commands[:, :2], 1e5), self.commands[:, :2] + clip_val)
+        lin_vel_lower_bound = torch.where(self.commands[:, :2] > 0, torch.full_like(self.commands[:, :2], -1e5), self.commands[:, :2] - clip_val)
         clip_lin_vel = torch.clip(lin_vel, lin_vel_lower_bound, lin_vel_upper_bound)
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - clip_lin_vel), dim=1)
         return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
@@ -1608,7 +1647,82 @@ class LeggedRobot(BaseTask):
         return dof_error
 
     def _reward_hip_pos(self):
-        return torch.sum(torch.square(self.dof_pos[:, [0,3,6,9]] - self.default_dof_pos[:, [0,3,6,9]]), dim=1)
+        # cleanWMPg1: G1 has hip_pitch(yaw_axis 0,3), hip_roll(1,7), hip_yaw(2,8).
+        # WMP-g1 penalises hip_yaw + hip_roll (i.e. [1, 2, 7, 8]) to discourage
+        # outward hip rotation. We follow WMP-g1's indices exactly.
+        return torch.sum(torch.square(self.dof_pos[:, [1, 2, 7, 8]] - self.default_dof_pos[:, [1, 2, 7, 8]]), dim=1)
+
+    # ---- cleanWMPg1: G1-specific rewards (ported from WMP-g1 legged_robot_g1.py) ----
+    def _reward_alive(self):
+        # Reward for staying alive (1.0 every step that isn't terminated).
+        # Matches WMP-g1.
+        return 1.0
+
+    def _reward_stand_normal(self):
+        # Penalise body roll/pitch deviation from world up vector.
+        # Matches WMP-g1: projected_gravity xy components squared.
+        return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+
+    def _reward_not_fly(self):
+        # Reward staying grounded: at least one foot must be in contact.
+        # WMP-g1 indexes contact_flag with [:, 0] and [:, 1] (two feet of G1).
+        # self.contact_flag was promoted to a self attribute in compute_observations.
+        if not hasattr(self, "contact_flag") or self.contact_flag.shape[-1] < 2:
+            return torch.zeros(self.num_envs, device=self.device)
+        return torch.where(
+            torch.logical_or(self.contact_flag[:, 0], self.contact_flag[:, 1]),
+            1.0, 0.0,
+        )
+
+    def _reward_contact(self):
+        # WMP-g1: encourage bipedal contact pattern — both feet on OR both off.
+        # (Approximated as xor of the two foot contact flags.)
+        if not hasattr(self, "contact_flag") or self.contact_flag.shape[-1] < 2:
+            return torch.zeros(self.num_envs, device=self.device)
+        return torch.abs(self.contact_flag[:, 0].float() - self.contact_flag[:, 1].float())
+
+    def _reward_feet_distance(self):
+        # Penalise feet being too close (clip-like) or too far (split stance).
+        # Computed from rigid body positions in body frame.
+        if len(self.feet_indices) < 2:
+            return torch.zeros(self.num_envs, device=self.device)
+        foot_l = self.rigid_body_pos[:, self.feet_indices[0], :2]
+        foot_r = self.rigid_body_pos[:, self.feet_indices[1], :2]
+        feet_dist = torch.norm(foot_l - foot_r, dim=-1)
+        # Match WMP-g1 default_gap=0.22 (nominal hip-width-ish distance).
+        gap = self.cfg.rewards.default_gap
+        # Reward ~ exp shape; symmetric around `gap`.
+        return torch.square(feet_dist - gap)
+
+    def _reward_ankle_pos(self):
+        # Penalise ankle deviation from default. Indices 4,5,10,11 in G1 URDF order.
+        return torch.sum(torch.square(
+            self.dof_pos[:, [4, 5, 10, 11]] - self.default_dof_pos[:, [4, 5, 10, 11]]
+        ), dim=-1)
+
+    def _reward_waist_pos_dof29(self):
+        # Penalise waist yaw deviation. WMP-g1 indexes dof_pos[:, 12:13].
+        return torch.sum(torch.square(self.dof_pos[:, 12:13] - self.default_dof_pos[:, 12:13]), dim=-1)
+
+    def _reward_arm_pos_dof29(self):
+        # Penalise arm deviation from default. WMP-g1 indexes 13..26 (14 arm joints).
+        idx = list(range(13, 27))
+        return torch.sum(torch.square(
+            self.dof_pos[:, idx] - self.default_dof_pos[:, idx]
+        ), dim=-1)
+
+    def _reward_upper_action_rate(self):
+        # Penalise action changes on the upper body only (joints 13..end).
+        # Discourages arm flailing.
+        return torch.sum(torch.square(
+            self.last_actions[:, 13:] - self.actions[:, 13:]
+        ), dim=1)
+
+    def _reward_upper_action_smoothness(self):
+        # Penalise second-order action changes on upper body.
+        return torch.sum(torch.square(
+            self.last_last_actions[:, 13:] - 2.0 * self.last_actions[:, 13:] + self.actions[:, 13:]
+        ), dim=1)
 
     def _reward_delta_torques(self):
         return torch.sum(torch.square(self.torques - self.last_torques), dim=1)

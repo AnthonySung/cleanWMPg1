@@ -45,6 +45,7 @@ from rsl_rl.modules import ActorCritic, ActorCriticWMP, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
 from rsl_rl.algorithms.amp_discriminator import AMPDiscriminator
 from rsl_rl.datasets.motion_loader import AMPLoader
+from rsl_rl.datasets.g1_motion_loader import AMPLoaderG1  # cleanWMPg1
 from rsl_rl.utils.utils import Normalizer
 from rsl_rl.modules import DepthPredictor
 import torch.optim as optim
@@ -58,6 +59,13 @@ import collections
 from dreamer import tools
 import datetime
 import uuid
+
+# cleanWMPg1: env name -> (motion loader class, dreamer configs filename).
+_ENV_LOADERS = {
+    'a1': (AMPLoader,    'dreamer/configs.yaml'),
+    'g1': (AMPLoaderG1,  'dreamer/configs_g1.yaml'),
+}
+
 class WMPRunner:
 
     def __init__(self,
@@ -75,6 +83,9 @@ class WMPRunner:
         self.device = device
         self.env = env
         self.history_length = history_length
+        # cleanWMPg1: env.reset() MUST be called BEFORE the history_dim / actor_critic
+        # computation so the auto-fix in compute_observations stabilises num_obs.
+        _, _ = self.env.reset()
         if self.env.num_privileged_obs is not None:
             num_critic_obs = self.env.num_privileged_obs
         else:
@@ -95,6 +106,13 @@ class WMPRunner:
                                               weight_decay=self.depth_predictor_cfg["weight_decay"])
 
         self.history_dim = history_length * (self.env.num_obs - self.env.privileged_dim - self.env.height_dim-3) #exclude command
+
+        # cleanWMPg1: pick the right motion loader based on env name.
+        env_name = getattr(self.env.cfg.env, 'env_name', 'a1')
+        amp_loader_cls, _wm_yaml_name = _ENV_LOADERS.get(env_name, (AMPLoader, 'dreamer/configs.yaml'))
+        if not self.cfg["amp_motion_files"]:
+            print(f"[WMPRunner] no amp_motion_files for env_name={env_name}")
+
         actor_critic = ActorCriticWMP(num_actor_obs=num_actor_obs,
                                           num_critic_obs=num_critic_obs,
                                           num_actions=self.env.num_actions,
@@ -104,7 +122,7 @@ class WMPRunner:
                                           wm_feature_dim=self.wm_feature_dim,
                                           **self.policy_cfg).to(self.device)
 
-        amp_data = AMPLoader(
+        amp_data = amp_loader_cls(
             device, time_between_frames=self.env.dt, preload_transitions=True,
             num_preload_transitions=train_cfg['runner']['amp_num_preload_transitions'],
             motion_files=self.cfg["amp_motion_files"])
@@ -120,8 +138,9 @@ class WMPRunner:
         min_std = (
                 torch.tensor(self.cfg["min_normalized_std"], device=self.device) *
                 (torch.abs(self.env.dof_pos_limits[:, 1] - self.env.dof_pos_limits[:, 0])))
+        use_amp = bool(self.env.cfg.env.use_amp)
         self.alg: PPO = alg_class(actor_critic, discriminator, amp_data, amp_normalizer, device=self.device,
-                                  min_std=min_std, **self.alg_cfg)
+                                  min_std=min_std, use_amp=use_amp, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
@@ -136,14 +155,18 @@ class WMPRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
 
-        _, _ = self.env.reset()
+        # cleanWMPg1: duplicate env.reset() removed — called in __init__ already. 
+        # _, _ = self.env.reset()
 
 
     def _build_world_model(self):
         # world model
         print('Begin construct world model')
+        # cleanWMPg1: pick the right dreamer yaml based on env_name.
+        env_name = getattr(self.env.cfg.env, 'env_name', 'a1')
+        _, wm_yaml_name = _ENV_LOADERS.get(env_name, (AMPLoader, 'dreamer/configs.yaml'))
         configs = yaml.safe_load(
-            (pathlib.Path(sys.argv[0]).parent.parent.parent / "dreamer/configs.yaml").read_text()
+            (pathlib.Path(sys.argv[0]).parent.parent.parent / wm_yaml_name).read_text()
         )
 
         def recursive_update(base, update):
@@ -170,7 +193,9 @@ class WMPRunner:
         if (self.wm_config.wm_device != 'None'):
             self.wm_config.device = self.wm_config.wm_device
         self.wm_config.num_actions = self.wm_config.num_actions * self.env.cfg.depth.update_interval
-        prop_dim = self.env.num_obs - self.env.privileged_dim - self.env.height_dim - self.env.num_actions
+        # cleanWMPg1: use config prop_dim (matches WMP-g1's exact dimension) instead
+        # of the runtime formula which may include extra contact_flag padding.
+        prop_dim = self.env.cfg.env.prop_dim
         image_shape = self.env.cfg.depth.resized + (1,)
         obs_shape = {'prop': (prop_dim,), 'image': image_shape,}
 
@@ -193,7 +218,8 @@ class WMPRunner:
         critic_obs = privileged_obs if privileged_obs is not None else obs
         obs, critic_obs, amp_obs = obs.to(self.device), critic_obs.to(self.device), amp_obs.to(self.device)
         self.alg.actor_critic.train()  # switch to train mode (for dropout for example)
-        self.alg.discriminator.train()
+        if self.alg.use_amp:
+            self.alg.discriminator.train()
 
         ep_infos = []
         rewbuffer = deque(maxlen=100)
@@ -204,11 +230,11 @@ class WMPRunner:
         tot_iter = self.current_learning_iteration + num_learning_iterations
 
         # process trajectory history
-        self.trajectory_history = torch.zeros(size=(self.env.num_envs, self.history_length, self.env.num_obs -
-                                                    self.env.privileged_dim - self.env.height_dim - 3),
-                                              device=self.device)
         obs_without_command = torch.concat((obs[:, self.env.privileged_dim:self.env.privileged_dim + 6],
                                             obs[:, self.env.privileged_dim + 9:-self.env.height_dim]), dim=1)
+        his_dim = obs_without_command.shape[-1]
+        self.trajectory_history = torch.zeros(size=(self.env.num_envs, self.history_length, his_dim),
+                                              device=self.device)
         self.trajectory_history = torch.concat((self.trajectory_history[:, 1:], obs_without_command.unsqueeze(1)),
                                                dim=1)
 
@@ -318,8 +344,9 @@ class WMPRunner:
                     next_amp_obs_with_term = torch.clone(next_amp_obs)
                     next_amp_obs_with_term[reset_env_ids] = terminal_amp_states
 
-                    rewards = self.alg.discriminator.predict_amp_reward(
-                        amp_obs, next_amp_obs_with_term, rewards, normalizer=self.alg.amp_normalizer)[0]
+                    if self.alg.use_amp:
+                        rewards = self.alg.discriminator.predict_amp_reward(
+                            amp_obs, next_amp_obs_with_term, rewards, normalizer=self.alg.amp_normalizer)[0]
                     amp_obs = torch.clone(next_amp_obs)
                     self.alg.process_env_step(rewards, dones, infos, next_amp_obs_with_term)
 
@@ -501,11 +528,12 @@ class WMPRunner:
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/vel_predict', locs['mean_vel_predict_loss'], locs['it'])
-        self.writer.add_scalar('Loss/AMP', locs['mean_amp_loss'], locs['it'])
-        self.writer.add_scalar('Loss/AMP_grad', locs['mean_grad_pen_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
-        self.writer.add_scalar('Loss/AMP_mean_policy_pred', locs['mean_policy_pred'], locs['it'])
-        self.writer.add_scalar('Loss/AMP_mean_expert_pred', locs['mean_expert_pred'], locs['it'])
+        if self.alg.use_amp:
+            self.writer.add_scalar('Loss/AMP', locs['mean_amp_loss'], locs['it'])
+            self.writer.add_scalar('Loss/AMP_grad', locs['mean_grad_pen_loss'], locs['it'])
+            self.writer.add_scalar('Loss/AMP_mean_policy_pred', locs['mean_policy_pred'], locs['it'])
+            self.writer.add_scalar('Loss/AMP_mean_expert_pred', locs['mean_expert_pred'], locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -519,20 +547,32 @@ class WMPRunner:
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 
         if len(locs['rewbuffer']) > 0:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                              'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Vel predict loss:':>{pad}} {locs['mean_vel_predict_loss']:.4f}\n"""
-                          f"""{'AMP loss:':>{pad}} {locs['mean_amp_loss']:.4f}\n"""
-                          f"""{'AMP grad pen loss:':>{pad}} {locs['mean_grad_pen_loss']:.4f}\n"""
-                          f"""{'AMP mean policy pred:':>{pad}} {locs['mean_policy_pred']:.4f}\n"""
-                          f"""{'AMP mean expert pred:':>{pad}} {locs['mean_expert_pred']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
-                          f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-                          f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
+            if self.alg.use_amp:
+                log_string = (f"""{'#' * width}\n"""
+                              f"""{str.center(width, ' ')}\n\n"""
+                              f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                                  'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                              f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                              f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                              f"""{'Vel predict loss:':>{pad}} {locs['mean_vel_predict_loss']:.4f}\n"""
+                              f"""{'AMP loss:':>{pad}} {locs['mean_amp_loss']:.4f}\n"""
+                              f"""{'AMP grad pen loss:':>{pad}} {locs['mean_grad_pen_loss']:.4f}\n"""
+                              f"""{'AMP mean policy pred:':>{pad}} {locs['mean_policy_pred']:.4f}\n"""
+                              f"""{'AMP mean expert pred:':>{pad}} {locs['mean_expert_pred']:.4f}\n"""
+                              f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                              f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+                              f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
+            else:
+                log_string = (f"""{'#' * width}\n"""
+                              f"""{str.center(width, ' ')}\n\n"""
+                              f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                                  'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                              f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                              f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                              f"""{'Vel predict loss:':>{pad}} {locs['mean_vel_predict_loss']:.4f}\n"""
+                              f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                              f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+                              f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
             #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
         else:

@@ -64,6 +64,7 @@ class AMPPPO:
                  device='cpu',
                  amp_replay_buffer_size=100000,
                  min_std=None,
+                 use_amp=True,                # cleanWMPg1: G1 plain task runs without AMP
                  ):
 
         self.device = device
@@ -72,28 +73,40 @@ class AMPPPO:
         self.schedule = schedule
         self.learning_rate = learning_rate
         self.min_std = min_std
-
-        # Discriminator components
-        self.discriminator = discriminator
-        self.discriminator.to(self.device)
-        self.amp_transition = RolloutStorage.Transition()
-        self.amp_storage = ReplayBuffer(
-            discriminator.input_dim // 2, amp_replay_buffer_size, device)
-        self.amp_data = amp_data
-        self.amp_normalizer = amp_normalizer
+        self.use_amp = use_amp
 
         # PPO components
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
         self.storage = None  # initialized later
 
-        # Optimizer for policy and discriminator.
-        params = [
-            {'params': self.actor_critic.parameters(), 'name': 'actor_critic'},
-            {'params': self.discriminator.trunk.parameters(),
-             'weight_decay': 10e-4, 'name': 'amp_trunk'},
-            {'params': self.discriminator.amp_linear.parameters(),
-             'weight_decay': 10e-2, 'name': 'amp_head'}]
+        if self.use_amp:
+            # Discriminator components
+            self.discriminator = discriminator
+            self.discriminator.to(self.device)
+            self.amp_transition = RolloutStorage.Transition()
+            self.amp_storage = ReplayBuffer(
+                discriminator.input_dim // 2, amp_replay_buffer_size, device)
+            self.amp_data = amp_data
+            self.amp_normalizer = amp_normalizer
+            # Optimizer for policy and discriminator.
+            params = [
+                {'params': self.actor_critic.parameters(), 'name': 'actor_critic'},
+                {'params': self.discriminator.trunk.parameters(),
+                 'weight_decay': 10e-4, 'name': 'amp_trunk'},
+                {'params': self.discriminator.amp_linear.parameters(),
+                 'weight_decay': 10e-2, 'name': 'amp_head'}]
+        else:
+            self.discriminator = None
+            self.amp_data = None
+            self.amp_normalizer = None
+            self.amp_transition = None
+            self.amp_storage = None
+            # Optimizer for policy only.
+            params = [
+                {'params': self.actor_critic.parameters(), 'name': 'actor_critic'},
+            ]
+
         self.optimizer = optim.Adam(params, lr=learning_rate)
         self.transition = RolloutStorage.Transition()
 
@@ -138,7 +151,8 @@ class AMPPPO:
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
-        self.amp_transition.observations = amp_obs
+        if self.use_amp:
+            self.amp_transition.observations = amp_obs
         return self.transition.actions
 
     def process_env_step(self, rewards, dones, infos, amp_obs):
@@ -150,13 +164,15 @@ class AMPPPO:
                 self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
 
         not_done_idxs = (dones == False).nonzero().squeeze()
-        self.amp_storage.insert(
-            self.amp_transition.observations, amp_obs)
+        if self.use_amp:
+            self.amp_storage.insert(
+                self.amp_transition.observations, amp_obs)
 
         # Record the transition
         self.storage.add_transitions(self.transition)
         self.transition.clear()
-        self.amp_transition.clear()
+        if self.use_amp:
+            self.amp_transition.clear()
         self.actor_critic.reset(dones)
 
     def compute_returns(self, last_critic_obs, wm_feature):
@@ -179,15 +195,22 @@ class AMPPPO:
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
-        amp_policy_generator = self.amp_storage.feed_forward_generator(
-            self.num_learning_epochs * self.num_mini_batches,
-            self.storage.num_envs * self.storage.num_transitions_per_env //
-            self.num_mini_batches)
-        amp_expert_generator = self.amp_data.feed_forward_generator(
-            self.num_learning_epochs * self.num_mini_batches,
-            self.storage.num_envs * self.storage.num_transitions_per_env //
-            self.num_mini_batches)
-        for sample, sample_amp_policy, sample_amp_expert in zip(generator, amp_policy_generator, amp_expert_generator):
+        if self.use_amp:
+            amp_policy_generator = self.amp_storage.feed_forward_generator(
+                self.num_learning_epochs * self.num_mini_batches,
+                self.storage.num_envs * self.storage.num_transitions_per_env //
+                self.num_mini_batches)
+            amp_expert_generator = self.amp_data.feed_forward_generator(
+                self.num_learning_epochs * self.num_mini_batches,
+                self.storage.num_envs * self.storage.num_transitions_per_env //
+                self.num_mini_batches)
+        else:
+            amp_policy_generator = None
+            amp_expert_generator = None
+
+        amp_loss = 0
+        grad_pen_loss = 0
+        for sample in generator:
 
             obs_batch, critic_obs_batch, actions_batch, history_batch, wm_feature_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
             old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch = sample
@@ -242,25 +265,28 @@ class AMPPPO:
                                 self.actor_critic.privileged_dim - 3: self.actor_critic.privileged_dim]
             vel_predict_loss = (predicted_linear_vel - target_linear_vel).pow(2).mean()
 
-            # Discriminator loss.
-            policy_state, policy_next_state = sample_amp_policy
-            expert_state, expert_next_state = sample_amp_expert
+            # Discriminator loss (only if AMP is enabled).
+            if self.use_amp:
+                sample_amp_policy = next(amp_policy_generator)
+                sample_amp_expert = next(amp_expert_generator)
+                policy_state, policy_next_state = sample_amp_policy
+                expert_state, expert_next_state = sample_amp_expert
 
-            if self.amp_normalizer is not None:
-                with torch.no_grad():
-                    policy_state = self.amp_normalizer.normalize_torch(policy_state, self.device)
-                    policy_next_state = self.amp_normalizer.normalize_torch(policy_next_state, self.device)
-                    expert_state = self.amp_normalizer.normalize_torch(expert_state, self.device)
-                    expert_next_state = self.amp_normalizer.normalize_torch(expert_next_state, self.device)
-            policy_d = self.discriminator(torch.cat([policy_state, policy_next_state], dim=-1))
-            expert_d = self.discriminator(torch.cat([expert_state, expert_next_state], dim=-1))
-            expert_loss = torch.nn.MSELoss()(
-                expert_d, torch.ones(expert_d.size(), device=self.device))
-            policy_loss = torch.nn.MSELoss()(
-                policy_d, -1 * torch.ones(policy_d.size(), device=self.device))
-            amp_loss = 0.5 * (expert_loss + policy_loss)
-            grad_pen_loss = self.discriminator.compute_grad_pen(
-                *sample_amp_expert, lambda_=10)
+                if self.amp_normalizer is not None:
+                    with torch.no_grad():
+                        policy_state = self.amp_normalizer.normalize_torch(policy_state, self.device)
+                        policy_next_state = self.amp_normalizer.normalize_torch(policy_next_state, self.device)
+                        expert_state = self.amp_normalizer.normalize_torch(expert_state, self.device)
+                        expert_next_state = self.amp_normalizer.normalize_torch(expert_next_state, self.device)
+                policy_d = self.discriminator(torch.cat([policy_state, policy_next_state], dim=-1))
+                expert_d = self.discriminator(torch.cat([expert_state, expert_next_state], dim=-1))
+                expert_loss = torch.nn.MSELoss()(
+                    expert_d, torch.ones(expert_d.size(), device=self.device))
+                policy_loss = torch.nn.MSELoss()(
+                    policy_d, -1 * torch.ones(policy_d.size(), device=self.device))
+                amp_loss = 0.5 * (expert_loss + policy_loss)
+                grad_pen_loss = self.discriminator.compute_grad_pen(
+                    *sample_amp_expert, lambda_=10)
 
             # Compute total loss.
             loss = (
@@ -279,16 +305,17 @@ class AMPPPO:
             if not self.actor_critic.fixed_std and self.min_std is not None:
                 self.actor_critic.std.data = self.actor_critic.std.data.clamp(min=self.min_std)
 
-            if self.amp_normalizer is not None:
-                self.amp_normalizer.update(policy_state.cpu().numpy())
-                self.amp_normalizer.update(expert_state.cpu().numpy())
+            if self.use_amp and self.amp_normalizer is not None:
+                with torch.no_grad():
+                    self.amp_normalizer.update(policy_state.cpu().numpy())
+                    self.amp_normalizer.update(expert_state.cpu().numpy())
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
-            mean_amp_loss += amp_loss.item()
-            mean_grad_pen_loss += grad_pen_loss.item()
-            mean_policy_pred += policy_d.mean().item()
-            mean_expert_pred += expert_d.mean().item()
+            mean_amp_loss += amp_loss.item() if self.use_amp and isinstance(amp_loss, torch.Tensor) else 0.0
+            mean_grad_pen_loss += grad_pen_loss.item() if self.use_amp and isinstance(grad_pen_loss, torch.Tensor) else 0.0
+            mean_policy_pred += policy_d.mean().item() if self.use_amp else 0.0
+            mean_expert_pred += expert_d.mean().item() if self.use_amp else 0.0
             mean_vel_predict_loss += vel_predict_loss.mean().item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
