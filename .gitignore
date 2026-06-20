@@ -5,3 +5,5 @@ Thumbs.db
 logs/
 videos/
 *.egg-info/
+review_result.md
+.hermes-tmp.*
