@@ -585,10 +585,14 @@ class SymlogDist:
             value = value.float()
         if self._dist == "mse":
             distance = (self._mode - symlog(value)) ** 2.0
-            distance = torch.where(distance < self._tol, 0, distance)
+            # cleanWMPg1: use 0.0 (not 0) so torch.where dtype matches the
+            # float `distance` tensor. PyTorch 1.10 + cuda promotes the int
+            # literal 0 to long, which raises:
+            #   RuntimeError: expected scalar type long int but found float
+            distance = torch.where(distance < self._tol, torch.zeros_like(distance), distance)
         elif self._dist == "abs":
             distance = torch.abs(self._mode - symlog(value))
-            distance = torch.where(distance < self._tol, 0, distance)
+            distance = torch.where(distance < self._tol, torch.zeros_like(distance), distance)
         else:
             raise NotImplementedError(self._dist)
         if self._agg == "mean":
