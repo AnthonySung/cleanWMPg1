@@ -7,3 +7,5 @@ videos/
 *.egg-info/
 review_result.md
 .hermes-tmp.*
+*.log
+review_snapshot_*.txt
