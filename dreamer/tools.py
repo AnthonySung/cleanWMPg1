@@ -587,13 +587,15 @@ class SymlogDist:
             value = value.float()
         if self._dist == "mse":
             distance = (self._mode - symlog(value)) ** 2.0
-            # cleanWMPg1: use 0.0 (float) instead of 0 (int) so torch.where
-            # doesn't promote the float `distance` tensor to long.
-            distance = torch.where(distance < self._tol, 0.0, distance)
+            # cleanWMPg1: use torch.zeros_like to match the dtype of `distance`
+            # exactly. PyTorch's default `0` int literal becomes long;
+            # `0.0` float32 literal mismatches when `distance` is float64
+            # (which happens because `self._tol=1e-8` is Python double and
+            # the comparison promotes distance). zeros_like avoids both.
+            distance = torch.where(distance < self._tol, torch.zeros_like(distance), distance)
         elif self._dist == "abs":
             distance = torch.abs(self._mode - symlog(value))
-            # cleanWMPg1: same — use 0.0 to keep dtype float.
-            distance = torch.where(distance < self._tol, 0.0, distance)
+            distance = torch.where(distance < self._tol, torch.zeros_like(distance), distance)
         else:
             raise NotImplementedError(self._dist)
         if self._agg == "mean":
