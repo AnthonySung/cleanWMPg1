@@ -40,6 +40,9 @@ class A1RoughCfg( LeggedRobotCfg ):
         include_history_steps = None  # Number of steps of history to include.
         num_observations = 235
         num_privileged_obs = 235
+        # cleanWMPg1: tag this config as 'a1' so the WMPRunner's env-name
+        # dispatch picks the right loader (see commit e5252b4).
+        env_name = 'a1'
         reference_state_initialization = False
         # reference_state_initialization_prob = 0.85
         # amp_motion_files = MOTION_FILES

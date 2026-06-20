@@ -44,6 +44,11 @@ class A1AMPCfg(LeggedRobotCfg):
         include_history_steps = None  # Number of steps of history to include.
         prop_dim = 33 # proprioception
         action_dim = 12
+        # cleanWMPg1: explicitly tag this config as 'a1' so the WMPRunner's
+        # env-name dispatch picks AMPLoader + dreamer/configs.yaml. Without
+        # this the runner raises KeyError (correct behaviour — see commit
+        # e5252b4 for the rationale).
+        env_name = 'a1'
         privileged_dim = 24 + 26 + 3  # privileged_obs[:,:privileged_dim] is the privileged information in privileged_obs, include 3-dim base linear vel
         height_dim = 187  # privileged_obs[:,-height_dim:] is the heightmap in privileged_obs
         forward_height_dim = 525 # for depth image prediction
