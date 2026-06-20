@@ -512,10 +512,15 @@ class DiscDist:
         above = torch.clip(above, 0, len(self.buckets) - 1)
         equal = below == above
 
-        # cleanWMPg1: use 1.0 (float) so torch.where doesn't promote the
-        # surrounding float tensors to long.
-        dist_to_below = torch.where(equal, 1.0, torch.abs(self.buckets[below] - x))
-        dist_to_above = torch.where(equal, 1.0, torch.abs(self.buckets[above] - x))
+        # cleanWMPg1: use torch.ones_like to match the dtype of the surrounding
+        # float tensor exactly. PyTorch 1.10 + cuda promotes `1.0` to a
+        # different float precision (float32) than the doubled tensors here
+        # (float64) when self.buckets is float64 — leading to:
+        #   RuntimeError: expected scalar type double but found float
+        # ones_like / zeros_like preserves dtype.
+        one = torch.ones_like(self.buckets[below])
+        dist_to_below = torch.where(equal, one, torch.abs(self.buckets[below] - x))
+        dist_to_above = torch.where(equal, one, torch.abs(self.buckets[above] - x))
         total = dist_to_below + dist_to_above
         weight_below = dist_to_above / total
         weight_above = dist_to_below / total
