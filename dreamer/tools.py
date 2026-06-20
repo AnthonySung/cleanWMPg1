@@ -579,23 +579,19 @@ class SymlogDist:
         # cleanWMPg1: torch.where() and ** 2.0 both require consistent dtypes.
         # The MSE/Abs heads store _mode as a symlog-encoded float tensor
         # (output of an MLP), but WM targets like is_first / is_terminal may
-        # arrive as long. Cast to float (lossy for ints > 2^24 but fine for
-        # binary indicators) so symlog and the where() stay consistent.
-        if self._mode.dtype != torch.float32:
-            self._mode = self._mode.float()
-        if value.dtype != torch.float32:
-            value = value.float()
+        # arrive as long. Cast everything to float32 first; use 0.0 (float)
+        # instead of 0 (int) so torch.where doesn't promote the result to
+        # long. 0.0 is float32 by default which matches `distance` dtype.
+        self._mode = self._mode.float()
+        value = value.float()
         if self._dist == "mse":
             distance = (self._mode - symlog(value)) ** 2.0
-            # cleanWMPg1: use torch.zeros_like to match the dtype of `distance`
-            # exactly. PyTorch's default `0` int literal becomes long;
-            # `0.0` float32 literal mismatches when `distance` is float64
-            # (which happens because `self._tol=1e-8` is Python double and
-            # the comparison promotes distance). zeros_like avoids both.
-            distance = torch.where(distance < self._tol, torch.zeros_like(distance), distance)
+            distance = torch.where(distance < self._tol,
+                                   torch.zeros_like(distance), distance)
         elif self._dist == "abs":
             distance = torch.abs(self._mode - symlog(value))
-            distance = torch.where(distance < self._tol, torch.zeros_like(distance), distance)
+            distance = torch.where(distance < self._tol,
+                                   torch.zeros_like(distance), distance)
         else:
             raise NotImplementedError(self._dist)
         if self._agg == "mean":
