@@ -54,7 +54,6 @@ from dreamer.models import *
 import ruamel.yaml as yaml
 import argparse
 import pathlib
-import sys
 import collections
 from dreamer import tools
 import datetime
@@ -105,11 +104,30 @@ class WMPRunner:
         self.depth_predictor_opt = optim.Adam(self.depth_predictor.parameters(), lr=self.depth_predictor_cfg["lr"],
                                               weight_decay=self.depth_predictor_cfg["weight_decay"])
 
-        self.history_dim = history_length * (self.env.num_obs - self.env.privileged_dim - self.env.height_dim-3) #exclude command
+        # cleanWMPg1: history_dim = (prop_slice_with_commands_stripped) * history_length.
+        # Layout of obs_buf after the auto-fix in compute_observations has run
+        # (privileged_dim now reflects the live [contact_force | contact_flag]
+        # front strip rather than the stale config value):
+        #   obs_buf[:, privileged_dim:privileged_dim+6]   = base_lin_vel(3) + base_ang_vel(3)
+        #   obs_buf[:, privileged_dim+6:privileged_dim+9] = commands(3)        <- skipped
+        #   obs_buf[:, privileged_dim+9:-height_dim]      = (dof_pos-default)(29) + dof_vel(29) + actions(29)
+        #   obs_buf[:, -height_dim:]                       = heights(187)
+        # The `-3` strips the 3-dim command block from the history.
+        self.history_dim = history_length * (self.env.num_obs - self.env.privileged_dim - self.env.height_dim - 3)  # exclude command
 
         # cleanWMPg1: pick the right motion loader based on env name.
-        env_name = getattr(self.env.cfg.env, 'env_name', 'a1')
-        amp_loader_cls, _wm_yaml_name = _ENV_LOADERS.get(env_name, (AMPLoader, 'dreamer/configs.yaml'))
+        env_name = getattr(self.env.cfg.env, 'env_name', None)
+        if env_name is None:
+            raise KeyError(
+                "WMPRunner: cfg.env.env_name is not set. Set "
+                "G1AMPCfg.env.env_name = 'g1' (or 'a1' for the A1 task)."
+            )
+        if env_name not in _ENV_LOADERS:
+            raise KeyError(
+                f"WMPRunner: unknown env_name={env_name!r}. "
+                f"Known: {sorted(_ENV_LOADERS)}. Add an entry in _ENV_LOADERS."
+            )
+        amp_loader_cls, _wm_yaml_name = _ENV_LOADERS[env_name]
         if not self.cfg["amp_motion_files"]:
             print(f"[WMPRunner] no amp_motion_files for env_name={env_name}")
 
@@ -164,10 +182,19 @@ class WMPRunner:
         print('Begin construct world model')
         # cleanWMPg1: pick the right dreamer yaml based on env_name.
         env_name = getattr(self.env.cfg.env, 'env_name', 'a1')
-        _, wm_yaml_name = _ENV_LOADERS.get(env_name, (AMPLoader, 'dreamer/configs.yaml'))
-        configs = yaml.safe_load(
-            (pathlib.Path(sys.argv[0]).parent.parent.parent / wm_yaml_name).read_text()
-        )
+        if env_name not in _ENV_LOADERS:
+            raise KeyError(
+                f"WMPRunner._build_world_model: unknown env_name={env_name!r}. "
+                f"Known: {sorted(_ENV_LOADERS)}. Add an entry in _ENV_LOADERS."
+            )
+        _, wm_yaml_name = _ENV_LOADERS[env_name]
+        # Anchor at this file's location rather than sys.argv[0] (which is
+        # '-c' when run via `python -u -c "..."` and changes meaning under
+        # `python -m ...`). This runner sits at <repo>/rsl_rl/runners/, so
+        # parents[2] is the repo root and `dreamer/<yaml>` resolves correctly
+        # regardless of CWD or invocation style.
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        configs = yaml.safe_load((repo_root / wm_yaml_name).read_text())
 
         def recursive_update(base, update):
             for key, value in update.items():

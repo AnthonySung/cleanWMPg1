@@ -486,13 +486,39 @@ class LeggedRobot(BaseTask):
         else:
             self.obs_buf = torch.clone(self.privileged_obs_buf)
 
-        # cleanWMPg1: auto-fix num_obs if it changed after stepping.
-        # This can happen because contact_flag cardinality (determined by
-        # URDF body-name matches) may differ from the configured value.
+        # cleanWMPg1: auto-fix num_obs / num_privileged_obs / privileged_dim if they
+        # changed after stepping. This can happen because contact_flag
+        # cardinality (determined by URDF body-name matches) and contact_force
+        # cardinality (determined by feet_indices / num_force_sensors) may
+        # differ from the configured value. Without this fix, slice indices
+        # in actor_critic_wmp.py and amp_ppo.py that depend on
+        # `privileged_dim` (e.g. `obs[:, privileged_dim:privileged_dim+3]` for
+        # base_lin_vel) would point at the wrong region of the buffer.
         actual_obs = self.obs_buf.shape[-1]
         if actual_obs != self.num_obs:
             self.num_obs = actual_obs
             self.num_privileged_obs = actual_obs  # obs == privileged_obs in WMP
+            # privileged_obs_buf layout in WMP is:
+            #   [DR_params | contact_force | contact_flag | base_lin_vel(3) |
+            #    base_ang_vel(3) | proj_grav(3) | commands(3) | (dof_pos-default)(29)
+            #    | dof_vel(29) | actions(29) | heights]
+            # so the offset of base_lin_vel equals the front-strip length.
+            # Compute it from the live counts rather than trusting the cfg.
+            prefix_dim = (
+                self.contact_flag.shape[-1]
+                + self.sensor_forces.shape[1] * 3
+            )
+            if self.cfg.domain_rand.randomize_friction:
+                prefix_dim += 1  # randomized_frictions
+            if self.cfg.domain_rand.randomize_restitution:
+                prefix_dim += 1
+            if self.cfg.domain_rand.randomize_base_mass:
+                prefix_dim += 1
+            if self.cfg.domain_rand.randomize_com_pos:
+                prefix_dim += 3
+            if self.cfg.domain_rand.randomize_gains:
+                prefix_dim += 29 + 29  # p_gains and d_gains scale factors
+            self.privileged_dim = prefix_dim
 
     def get_amp_observations(self):
         joint_pos = self.dof_pos

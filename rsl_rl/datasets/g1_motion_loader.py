@@ -125,12 +125,24 @@ class AMPLoaderG1:
 
                 # angular velocity from quaternion difference, expressed in body frame
                 rel_rot = _quat_mul(rot[1:], _quat_conj(rot[:-1]))   # q_{t} * q_{t-1}^{-1}
-                # angle-axis from relative rotation
-                w = rel_rot[..., 3].clamp(-1.0, 1.0)
-                angle = 2.0 * torch.atan2(torch.linalg.norm(rel_rot[..., :3], dim=-1), w)
+                # angle-axis from relative rotation. atan2(||v||, w) returns an
+                # angle in [0, π] for any quaternion (it's always non-negative),
+                # so a *negative* rotation (θ < 0) produces a positive angle
+                # with the wrong axis sign. The standard fix is to inspect the
+                # original w: if w < 0 the angle is actually -2*atan2(||v||, |w|)
+                # and the axis needs to be flipped. Equivalently, we can rotate
+                # rel_rot to canonical hemisphere (w ≥ 0) before extracting
+                # angle/axis, which restores the sign of the rotation.
+                w_raw = rel_rot[..., 3]
+                # Force quaternion into canonical hemisphere (w >= 0) so the
+                # extracted angle-axis matches the signed rotation.
+                sign = torch.where(w_raw < 0, -torch.ones_like(w_raw), torch.ones_like(w_raw))
+                rel_rot_canon = rel_rot * sign.unsqueeze(-1)
+                w = rel_rot_canon[..., 3].clamp(-1.0, 1.0)
+                angle = 2.0 * torch.atan2(torch.linalg.norm(rel_rot_canon[..., :3], dim=-1), w)
                 # small-angle safe normalisation
-                sin_half = torch.linalg.norm(rel_rot[..., :3], dim=-1)
-                axis = rel_rot[..., :3] / sin_half.clamp(min=1e-8).unsqueeze(-1)
+                sin_half = torch.linalg.norm(rel_rot_canon[..., :3], dim=-1)
+                axis = rel_rot_canon[..., :3] / sin_half.clamp(min=1e-8).unsqueeze(-1)
                 # Fold >pi rotations into [-pi, pi]
                 neg = angle > np.pi
                 angle = torch.where(neg, 2 * np.pi - angle, angle)
@@ -182,7 +194,11 @@ class AMPLoaderG1:
             with open(path, "r") as f:
                 head = f.readline()
                 if head.lstrip().startswith("{"):
-                    obj = json.loads(open(path).read())
+                    # File is JSONL-like: header + JSON rows. Re-read the whole
+                    # file to parse the header JSON. (Was leaking a file handle
+                    # via bare `open(path).read()` in the previous version.)
+                    f.seek(0)
+                    obj = json.loads(f.read())
                     return float(obj.get("FrameDuration", self.frame_duration_default))
         except Exception:
             pass

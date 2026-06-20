@@ -45,7 +45,14 @@ class G1RoughCfg(LeggedRobotCfg):
         # prop = ang_vel(3) + proj_grav(3) + cmd(3) + (dof_pos-default)(29) + dof_vel(29) = 67
         # WMP-g1's prop_dim = 69 + 29 also includes 2 phase dims (sin/cos gait phase).
         # cleanWMPg1 matches WMP-g1's design including the phase dims.
-        prop_dim = 3 + 3 + 3 + 3 + 29 + 29 + 2  # 72 (ang_vel3+grav3+cmd3+(dof_pos-default)29+dof_vel29+phase2)
+        # Post-privileged slice fed to the world model. Layout (matches what
+        # LeggedRobot.compute_observations actually writes into obs_buf after the
+        # [contact_force | contact_flag] front strip):
+        #   base_lin_vel(3) + base_ang_vel(3) + proj_grav(3) + commands(3)
+        #   + (dof_pos-default)(29) + dof_vel(29) = 70
+        # (No gait phase is appended — cleanWMPg1 omits the 2-d phase from
+        # upstream WMP-g1 to keep the env pure.)
+        prop_dim = 3 + 3 + 3 + 3 + 29 + 29  # 70
         action_dim = 29
         num_actions = 29
         # Privileged slice (matches WMP-g1: only base_lin_vel + contact_flag + DR params).
@@ -207,11 +214,14 @@ class G1AMPCfg(G1RoughCfg):
     class env(LeggedRobotCfg.env):
         num_envs = 4096
         include_history_steps = None
-        prop_dim = 3 + 3 + 3 + 3 + 29 + 29 + 2  # 72 (ang_vel3+grav3+cmd3+(dof_pos-default)29+dof_vel29+phase2) (matches WMP-g1: includes 2 phase dims)
+        prop_dim = 3 + 3 + 3 + 3 + 29 + 29  # 70 (ang_vel3+grav3+cmd3+(dof_pos-default)29+dof_vel29)
         action_dim = 29
         num_actions = 29
         # Privileged slice (matches WMP-g1's stripped form: only base_lin_vel +
         # contact_flag; kp/kd DR were removed from observations in WMP-g1).
+        # NOTE: this value is informational only — the actual offset is
+        # recomputed at runtime by LeggedRobot.compute_observations from the
+        # live contact_force + contact_flag cardinality (see auto-fix there).
         privileged_dim = 13 + 3  # 16
         height_dim = 187
         forward_height_dim = 525
