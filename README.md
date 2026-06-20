@@ -10,6 +10,23 @@ This repository keeps **WMP's algorithm intact** — same world model, same AMP-
 * Dreamer world-model `num_actions` (=29)
 * Runner dispatch: AMP on/off driven by `env.cfg.env.use_amp`
 
+## Status
+
+- **Last full validation**: 2026-06-20, real training run on the
+  AutoDL RTX 3090. 79/200 PPO iters completed at 4096 envs, killed
+  externally by OOM (a concurrent sibling training pushed combined
+  memory past 24 GB). Metrics were healthy throughout: tracking
+  reward `0.275 → 1.309` (+375%), mean reward `7.16 → 16.50` (+130%),
+  AMP loss converged to `0.015` by iter 9.
+- **Last code-review pass**: 2026-06-20, two rounds of Claude Code
+  audit. All 11 distinct bugs found across rounds 2 and 3 were
+  validated against the actual source and fixed; see
+  `PROGRESS.md` for the full list and `review_result.md` for the
+  reviewer's output.
+- **Not yet validated**: full 200-iter training to convergence,
+  `depth.use_camera=True` mode (driver-580 / CUDA-13 segfaults on
+  the current container), AMP hyperparameter sweep.
+
 ## Not included (intentionally)
 
 Compared to the `AnthonySung/WMP-g1` repo, the following author-introduced
@@ -36,26 +53,30 @@ research ideas, not part of WMP the paper.
 
 ```
 cleanWMPg1/
-├── ANALYSIS.md                         # WMP vs WMP-g1 diff analysis (WMP-g1 audit report: see below)
+├── README.md                             # this file (status, usage, citation)
+├── PROGRESS.md                           # bug-fix log + training validation history
+├── ANALYSIS.md                           # WMP vs WMP-g1 diff analysis (audit report)
+├── review_result.md                      # latest Claude Code review output
+├── training_long_summary.md              # 79-iter training run detail
 ├── legged_gym/
 │   ├── envs/
-│   │   ├── __init__.py                 # registers a1, a1_amp, g1, g1_amp
-│   │   ├── a1/                         # unchanged
+│   │   ├── __init__.py                   # registers a1, a1_amp, g1, g1_amp
+│   │   ├── a1/                           # unchanged
 │   │   └── g1/g1/
-│   │       └── g1_amp_config.py        # G1RoughCfg, G1AMPCfg + PPO
-│   ├── scripts/{train,play}.py         # unchanged (driven by task name)
+│   │       └── g1_amp_config.py          # G1RoughCfg, G1AMPCfg + PPO
+│   ├── scripts/{train,play}.py           # train.py reads CLEANWMPG1_TAG/MAX_ITERS/SAVE_INTERVAL env vars
 │   └── resources/robots/g1_description/  # g1_29dof.urdf + meshes (from unitree_rl_gym)
 ├── rsl_rl/
-│   ├── algorithms/amp_ppo.py           # +use_amp flag
-│   ├── datasets/g1_motion_loader.py    # CSV, self-implemented quaternion math
-│   ├── runners/wmp_runner.py           # +env_name dispatch (a1 vs g1)
-│   └── modules/actor_critic_wmp.py     # unchanged (already config-driven)
+│   ├── algorithms/amp_ppo.py             # +use_amp flag
+│   ├── datasets/g1_motion_loader.py      # CSV, self-implemented quaternion math
+│   ├── runners/wmp_runner.py             # +env_name dispatch (a1 vs g1)
+│   └── modules/actor_critic_wmp.py       # unchanged (already config-driven)
 ├── dreamer/
-│   ├── configs.yaml                    # A1 (num_actions=12)
-│   └── configs_g1.yaml                 # G1 (num_actions=29)
+│   ├── configs.yaml                      # A1 (num_actions=12)
+│   └── configs_g1.yaml                   # G1 (num_actions=29)
 └── datasets/
-    ├── mocap_motions/                  # A1 reference motions (JSON)
-    └── g1/                             # G1 reference motions (LAFAN1-style CSV)
+    ├── mocap_motions/                    # A1 reference motions (JSON)
+    └── g1/                               # G1 reference motions (LAFAN1-style CSV)
 ```
 
 ## Installation
@@ -86,10 +107,29 @@ cd cleanWMPg1
 
 # G1 AMP imitation (main task, ~24 GB GPU at 4096 envs)
 python legged_gym/scripts/train.py --task=g1_amp --headless --sim_device=cuda:0
+```
 
-# G1 plain PPO (no AMP) — not registered by default; use a1_amp with use_amp=False
-# python legged_gym/scripts/train.py --task=a1_amp --headless --sim_device=cuda:0
+`train.py` reads three env-var overrides (added 2026-06-20):
 
+| Env var | Default | Purpose |
+|---|---|---|
+| `CLEANWMPG1_TAG` | `WMP` | prefix for the timestamped log dir name, so multiple runs don't overwrite each other |
+| `CLEANWMPG1_MAX_ITERS` | `20000` | PPO `max_iterations` (override for shorter smoke runs or longer convergence runs) |
+| `CLEANWMPG1_SAVE_INTERVAL` | `500` | checkpoint save interval |
+
+Short smoke example:
+
+```bash
+CLEANWMPG1_TAG=smoke CLEANWMPG1_MAX_ITERS=50 \
+    python legged_gym/scripts/train.py --task=g1_amp --headless --sim_device=cuda:0
+```
+
+If you only have a few minutes of GPU budget, the smoke scripts
+(`smoke_one.sh`, `smoke_train.sh`, `verify_cleanWMPg1.sh`) are faster
+than `train.py` because they build env + runner directly without
+running through the full training script.
+
+```bash
 # A1 AMP (regression check vs upstream WMP)
 python legged_gym/scripts/train.py --task=a1_amp --headless --sim_device=cuda:0
 ```
