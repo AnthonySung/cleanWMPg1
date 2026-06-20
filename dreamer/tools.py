@@ -569,6 +569,13 @@ class SymlogDist:
 
     def log_prob(self, value):
         assert self._mode.shape == value.shape
+        # cleanWMPg1: cast value to match _mode dtype. Without this, the MSE
+        # head crashes with "expected scalar type long but found float" when
+        # the WM target tensor (e.g. reward, is_first) is float and the mode
+        # tensor is long (or vice versa) — typical for binary indicators fed
+        # through symlog.
+        if value.dtype != self._mode.dtype:
+            value = value.to(self._mode.dtype)
         if self._dist == "mse":
             distance = (self._mode - symlog(value)) ** 2.0
             distance = torch.where(distance < self._tol, 0, distance)
