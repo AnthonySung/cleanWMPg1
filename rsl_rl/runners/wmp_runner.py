@@ -268,7 +268,7 @@ class WMPRunner:
         # init world model input
         sum_wm_dataset_size = 0
         wm_latent = wm_action = None
-        wm_is_first = torch.ones(self.env.num_envs, device=self._world_model.device, dtype=torch.long)
+        wm_is_first = torch.ones(self.env.num_envs, device=self._world_model.device, dtype=torch.float32)
         wm_obs = {
             "prop": obs[:, self.env.privileged_dim: self.env.privileged_dim + self.env.cfg.env.prop_dim].to(self._world_model.device),
             "is_first": wm_is_first,
@@ -528,9 +528,11 @@ class WMPRunner:
                         value.append(v[idx, end_idx - batch_length: end_idx])
                 value = torch.stack(value)
                 batch_data[k] = value
-            # cleanWMPg1: was torch.zeros (default float); the WM dynamics
-            # treats is_first as a boolean mask, so use long.
-            is_first = torch.zeros((self.wm_config.batch_size, batch_length), dtype=torch.long)
+            # cleanWMPg1: keep is_first as float (it's a binary 0/1 indicator
+            # fed through MSE/continuous heads in the dreamer). Casting to
+            # long causes the MSE head log_prob() to crash on long↔float
+            # mismatches when symlog is applied.
+            is_first = torch.zeros((self.wm_config.batch_size, batch_length), dtype=torch.float32)
             is_first[:, 0] = 1
             batch_data["is_first"] = is_first
             post, context, mets = self._world_model._train(batch_data)
