@@ -1,11 +1,11 @@
 # cleanWMPg1 — 项目总结(2026-06-20 更新)
 
-> **当前状态**:长训练 **iter 122 / 100000** in progress,reward 从 6.81 升到 **29.17**(+328% in 122 iter)
+> **当前状态**:长训练 **iter 200 / 100000** in progress,reward 从 6.81 升到 **42.25**(+520% in 200 iter)
 > **代码路径**: `D:\songay\Project_cleanwWMPg1\cleanWMPg1\`
 > **服务器路径**: `/root/cleanWMPg1/`
 > **服务器训练 log**: `/root/cleanWMPg1/logs/long_20260620_232849/train.log`
-> **进程 PID**: 18604(还活着)
-> **GitHub HEAD**: `7b82c72`
+> **进程 PID**: 18604(还活着,etime 2h+)
+> **GitHub HEAD**: `d08ba49`
 
 ---
 
@@ -278,11 +278,20 @@ nvidia-smi --query-gpu=memory.used --format=csv,noheader
 
 ## 9. 三端一致性
 
-| 位置 | 状态 | HEAD commit |
-|---|---|---|
-| **GitHub** AnthonySung/cleanWMPg1 | ✅ master | `01b9983` |
-| **服务器** 31310 `/root/cleanWMPg1/` | ✅ git pull 最新 | 待 push 后同步 |
-| **本地** `D:\songay\Project_cleanwWMPg1\cleanWMPg1\` | ✅ 已 commit | `01b9983` |
+| 位置 | 状态 | HEAD commit | 推送方向 |
+|---|---|---|---|
+| **本地** `D:\songay\Project_cleanwWMPg1\cleanWMPg1\` | ✅ 已 commit + push | `d08ba49` | ⬆️ **唯一推送点** |
+| **GitHub** `AnthonySung/cleanWMPg1` | ✅ 同步 | `d08ba49` | 接收 ⬅️ / 不接收服务器 push |
+| **服务器** 31310 `/root/cleanWMPg1/` | ✅ 已 git pull | `7b82c72`(旧) | **只 pull,不 push** |
+
+### 工作流
+
+1. **本地编辑 + commit + push** → GitHub
+2. **服务器 git pull** 拿新代码
+3. **服务器重启训练 / 验证**
+4. **服务器训练结果 / log** → 本地归档(无需 push 回 GitHub)
+
+> ⚠️ 服务器是**只读**(只 pull),不要从服务器 `git push`,会导致 GitHub 拒绝或冲突。
 
 ---
 
