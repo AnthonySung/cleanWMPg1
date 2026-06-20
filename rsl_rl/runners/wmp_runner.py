@@ -401,9 +401,14 @@ class WMPRunner:
                     self.writer.add_scalar('World_model/' + name, float(np.mean(values)), it)
             print('training world model time:', time.time() - start_time)
 
-            # copy the config file
+            # cleanWMPg1: copy the env-specific config file (was hardcoded
+            # to a1/a1_amp_config.py; now uses the actual env's location).
             if(it == 0):
-                os.system("cp ./legged_gym/envs/a1/a1_amp_config.py " + self.log_dir + "/")
+                env_name = getattr(self.env.cfg.env, 'env_name', 'a1')
+                _config_path = f"./legged_gym/envs/{env_name}/{env_name}_amp_config.py"
+                if not os.path.isfile(_config_path):
+                    _config_path = f"./legged_gym/envs/{env_name}/{env_name}/{env_name}_amp_config.py"
+                os.system("cp " + _config_path + " " + self.log_dir + "/")
 
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))

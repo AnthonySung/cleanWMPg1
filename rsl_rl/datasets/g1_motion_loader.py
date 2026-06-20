@@ -68,7 +68,9 @@ class AMPLoaderG1:
     LINEAR_VEL_SIZE = 3
     ANGULAR_VEL_SIZE = 3
     JOINT_VEL_SIZE = 29
-    TOTAL_COLS = POS_SIZE + ROT_SIZE + JOINT_POS_SIZE  # 36
+    TOTAL_COLS = POS_SIZE + ROT_SIZE + JOINT_POS_SIZE  # 36 (CSV format, used for I/O)
+    # Full state dim stored in trajectories_full (pos + rot + joint_pos + lin_vel + ang_vel + joint_vel):
+    FULL_STATE_DIM = POS_SIZE + ROT_SIZE + JOINT_POS_SIZE + LINEAR_VEL_SIZE + ANGULAR_VEL_SIZE + JOINT_VEL_SIZE  # 71
 
     def __init__(self,
                  device,
@@ -246,7 +248,10 @@ class AMPLoaderG1:
             return None
         idx = np.random.choice(len(self.trajectories_full),
                                size=num_samples, p=self.trajectory_weights)
-        out = torch.zeros(num_samples, self.TOTAL_COLS, device=self.device)
+        # cleanWMPg1: previously allocated (num_samples, TOTAL_COLS)=36 but
+        # _get_full_frame_at_time returns FULL_STATE_DIM=71 entries. Use the
+        # correct size here so the assignment doesn't crash.
+        out = torch.zeros(num_samples, self.FULL_STATE_DIM, device=self.device)
         for i, ti in enumerate(idx):
             traj = self.trajectories_full[int(ti)]
             t = np.random.uniform(0.0, self.trajectory_lens[int(ti)])

@@ -1647,9 +1647,12 @@ class LeggedRobot(BaseTask):
         return dof_error
 
     def _reward_hip_pos(self):
-        # cleanWMPg1: G1 has hip_pitch(yaw_axis 0,3), hip_roll(1,7), hip_yaw(2,8).
-        # WMP-g1 penalises hip_yaw + hip_roll (i.e. [1, 2, 7, 8]) to discourage
-        # outward hip rotation. We follow WMP-g1's indices exactly.
+        # cleanWMPg1: G1 URDF order is left_hip_pitch(0), left_hip_roll(1),
+        # left_hip_yaw(2), ... right_hip_roll(7), right_hip_yaw(8). The
+        # indices [1, 2, 7, 8] cover the hip_roll and hip_yaw joints of both
+        # legs (i.e. the joints whose rotation axis is *not* the leg's
+        # forward direction). Penalising them discourages outward hip
+        # rotation / leg-crossing.
         return torch.sum(torch.square(self.dof_pos[:, [1, 2, 7, 8]] - self.default_dof_pos[:, [1, 2, 7, 8]]), dim=1)
 
     # ---- cleanWMPg1: G1-specific rewards (ported from WMP-g1 legged_robot_g1.py) ----
@@ -1664,22 +1667,25 @@ class LeggedRobot(BaseTask):
         return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
 
     def _reward_not_fly(self):
-        # Reward staying grounded: at least one foot must be in contact.
-        # WMP-g1 indexes contact_flag with [:, 0] and [:, 1] (two feet of G1).
-        # self.contact_flag was promoted to a self attribute in compute_observations.
-        if not hasattr(self, "contact_flag") or self.contact_flag.shape[-1] < 2:
+        # cleanWMPg1: contact_flag now correctly refers to the penalised-body
+        # contacts (hips/knees/etc.), NOT feet. To check whether a foot is on
+        # the ground we must read self.contact_forces at feet_indices directly.
+        if len(self.feet_indices) < 2:
             return torch.zeros(self.num_envs, device=self.device)
-        return torch.where(
-            torch.logical_or(self.contact_flag[:, 0], self.contact_flag[:, 1]),
-            1.0, 0.0,
-        )
+        left_foot  = torch.norm(self.contact_forces[:, self.feet_indices[0], :], dim=-1) > 1.0
+        right_foot = torch.norm(self.contact_forces[:, self.feet_indices[1], :], dim=-1) > 1.0
+        # reward at least one foot in contact
+        return torch.where(torch.logical_or(left_foot, right_foot), 1.0, 0.0)
+
 
     def _reward_contact(self):
-        # WMP-g1: encourage bipedal contact pattern — both feet on OR both off.
-        # (Approximated as xor of the two foot contact flags.)
-        if not hasattr(self, "contact_flag") or self.contact_flag.shape[-1] < 2:
+        # cleanWMPg1: use foot forces, not the penalised-body contact_flag.
+        if len(self.feet_indices) < 2:
             return torch.zeros(self.num_envs, device=self.device)
-        return torch.abs(self.contact_flag[:, 0].float() - self.contact_flag[:, 1].float())
+        left_foot  = torch.norm(self.contact_forces[:, self.feet_indices[0], :], dim=-1) > 1.0
+        right_foot = torch.norm(self.contact_forces[:, self.feet_indices[1], :], dim=-1) > 1.0
+        # encourage symmetric contact pattern: penalise xor of the two flags
+        return torch.abs(left_foot.float() - right_foot.float())
 
     def _reward_feet_distance(self):
         # Penalise feet being too close (clip-like) or too far (split stance).
@@ -1705,23 +1711,25 @@ class LeggedRobot(BaseTask):
         return torch.sum(torch.square(self.dof_pos[:, 12:13] - self.default_dof_pos[:, 12:13]), dim=-1)
 
     def _reward_arm_pos_dof29(self):
-        # Penalise arm deviation from default. WMP-g1 indexes 13..26 (14 arm joints).
-        idx = list(range(13, 27))
+        # cleanWMPg1: G1 URDF joint order is 12 legs + 3 waist + 14 arms, so
+        # arm joints live at indices 15..28 (NOT 13..26 as in WMP-g1's own
+        # implementation, which has a different URDF order). range(15, 29) = 14.
+        idx = list(range(15, 29))
         return torch.sum(torch.square(
             self.dof_pos[:, idx] - self.default_dof_pos[:, idx]
         ), dim=-1)
 
     def _reward_upper_action_rate(self):
-        # Penalise action changes on the upper body only (joints 13..end).
-        # Discourages arm flailing.
+        # cleanWMPg1: upper body = arms (indices 15..28), not "everything from
+        # joint 13" (which in G1's URDF order would include waist joints).
         return torch.sum(torch.square(
-            self.last_actions[:, 13:] - self.actions[:, 13:]
+            self.last_actions[:, 15:] - self.actions[:, 15:]
         ), dim=1)
 
     def _reward_upper_action_smoothness(self):
-        # Penalise second-order action changes on upper body.
+        # cleanWMPg1: same range fix as upper_action_rate.
         return torch.sum(torch.square(
-            self.last_last_actions[:, 13:] - 2.0 * self.last_actions[:, 13:] + self.actions[:, 13:]
+            self.last_last_actions[:, 15:] - 2.0 * self.last_actions[:, 15:] + self.actions[:, 15:]
         ), dim=1)
 
     def _reward_delta_torques(self):
@@ -1760,9 +1768,6 @@ class LeggedRobot(BaseTask):
         stumble_reward = torch.zeros_like(rew)
         stumble_reward[self.gap_start_idx:self.pit_end_idx] = rew[self.gap_start_idx:self.pit_end_idx]
         return stumble_reward
-
-    def _reward_delta_torques(self):
-        return torch.sum(torch.square(self.torques - self.last_torques), dim=1)
 
     def _reward_stuck(self):
         # Penalize stuck

@@ -115,9 +115,13 @@ class G1RoughCfg(LeggedRobotCfg):
         body_name = "waist"
         self_collisions = 1  # disable self-collision
         flip_visual_attachments = False
-        # G1 stock URDF has no force-torque sensors; pretend 4 to keep the
-        # privileged-obs concat code happy (zero-filled tensor is harmless).
-        num_force_sensors = 4
+        # cleanWMPg1: G1 URDF exposes 2 force-torque sensors by default
+        # (one per foot, attached to the bodies named in feet_names). The
+        # sensor tensor is therefore (num_envs, 2, 6) where [:, :, :3] is
+        # the force vector. Setting num_force_sensors=2 makes the explicit
+        # view path in _init_buffers() succeed without relying on the
+        # except-clause fallback.
+        num_force_sensors = 2
 
     class control(LeggedRobotCfg.control):
         # PD gains match WMP-g1 G1Cfg exactly. Ankle is much stiffer than what
