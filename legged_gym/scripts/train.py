@@ -48,10 +48,17 @@ import torch
 def train(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
 
-    train_cfg.runner.run_name = 'WMP'
-
-    train_cfg.runner.max_iterations = 100000
-    train_cfg.runner.save_interval = 1000
+    # cleanWMPg1: use a timestamped run name so multiple long runs don't
+    # overwrite each other; honour the CLEANWMPG1_MAX_ITERS env var for
+    # easier override from a shell script.
+    import os as _os
+    _tag = _os.environ.get("CLEANWMPG1_TAG", "WMP")
+    train_cfg.runner.run_name = f"{_tag}_{datetime.now().strftime('%b%d_%H-%M-%S')}"
+    # Override max_iterations if set in env var; default to 20000 (one full
+    # WMP-g1 training cycle) when not specified.
+    _max_iters = int(_os.environ.get("CLEANWMPG1_MAX_ITERS", "20000"))
+    train_cfg.runner.max_iterations = _max_iters
+    train_cfg.runner.save_interval = int(_os.environ.get("CLEANWMPG1_SAVE_INTERVAL", "500"))
 
     env, env_cfg = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     ppo_runner, train_cfg = task_registry.make_wmp_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
