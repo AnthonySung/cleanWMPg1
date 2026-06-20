@@ -194,7 +194,13 @@ class WorldModel(nn.Module):
         # 'is_terminal' is necesarry to train cont_head
         # assert "is_terminal" in obs
         # obs["cont"] = torch.Tensor(1.0 - obs["is_terminal"]).unsqueeze(-1)
-        obs = {k: torch.Tensor(v).to(self._config.device) for k, v in obs.items()}
+        # cleanWMPg1: original WMP code calls `torch.Tensor(v).to(device)` which
+        # fails when v is already a CUDA tensor (torch.Tensor copies the data
+        # with default device=CPU, then .to(cuda) tries to convert the meta
+        # tensor to CUDA — TypeError "expected TensorOptions(device=cpu) got
+        # device=cuda:0"). Use .clone() instead which preserves device and
+        # gradient, then .to(device) is a no-op.
+        obs = {k: (v.clone() if torch.is_tensor(v) else torch.as_tensor(v)).to(self._config.device) for k, v in obs.items()}
         return obs
 
     def video_pred(self, data):
