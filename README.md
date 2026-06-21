@@ -13,19 +13,18 @@ This repository keeps **WMP's algorithm intact** — same world model, same AMP-
 ## Status
 
 - **Last full validation**: 2026-06-20, real training run on the
-  AutoDL RTX 3090. 79/200 PPO iters completed at 4096 envs, killed
-  externally by OOM (a concurrent sibling training pushed combined
-  memory past 24 GB). Metrics were healthy throughout: tracking
-  reward `0.275 → 1.309` (+375%), mean reward `7.16 → 16.50` (+130%),
-  AMP loss converged to `0.015` by iter 9.
+  AutoDL RTX 3090. See `PROJECT_SUMMARY.md` for the full metrics table.
+  Short summary: iter 200 reached mean reward **42.25 (+520%)**,
+  tracking_lin_vel **0.39 → 3.5+**, AMP loss converged to **0.014**
+  by iter 9. All 11 distinct bugs found across two Claude Code audit
+  rounds were fixed.
 - **Last code-review pass**: 2026-06-20, two rounds of Claude Code
-  audit. All 11 distinct bugs found across rounds 2 and 3 were
-  validated against the actual source and fixed; see
-  `PROGRESS.md` for the full list and `review_result.md` for the
-  reviewer's output.
-- **Not yet validated**: full 200-iter training to convergence,
-  `depth.use_camera=True` mode (driver-580 / CUDA-13 segfaults on
-  the current container), AMP hyperparameter sweep.
+  audit. See `PROJECT_SUMMARY.md` §3 for the bug list and
+  `review_result.md` for the reviewer's raw output.
+- **Not yet validated**: full convergence (server run is targeting
+  ~20000 iters at ~5s/iter = ~28 hours; iter 200 already shows strong
+  learning), `depth.use_camera=True` mode (driver-580 / CUDA-13
+  segfaults on the current container), AMP hyperparameter sweep.
 
 ## Not included (intentionally)
 
@@ -54,10 +53,10 @@ research ideas, not part of WMP the paper.
 ```
 cleanWMPg1/
 ├── README.md                             # this file (status, usage, citation)
-├── PROGRESS.md                           # bug-fix log + training validation history
+├── PROJECT_SUMMARY.md                    # comprehensive status doc (Chinese + English; bug list, training progress, sync rules)
 ├── ANALYSIS.md                           # WMP vs WMP-g1 diff analysis (audit report)
 ├── review_result.md                      # latest Claude Code review output
-├── training_long_summary.md              # 79-iter training run detail
+├── training_long_summary.md              # 79-iter OOM-killed training run detail
 ├── legged_gym/
 │   ├── envs/
 │   │   ├── __init__.py                   # registers a1, a1_amp, g1, g1_amp

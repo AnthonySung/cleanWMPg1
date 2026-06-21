@@ -29,7 +29,7 @@
 - **Default joint angles**:全部 29 个 G1 关节
 - **contact 集合**:`["hip","knee","shoulder_yaw","elbow","torso"]`
 - **term 集合**:`["pelvis","waist","shoulder_pitch","knee"]`
-- **新增 10 个 G1-specific reward**:`alive`, `stand_normal`, `not_fly`, `contact`, `feet_distance`, `ankle_pos`, `waist_pos_dof29`, `arm_pos_dof29`, `upper_action_rate`, `upper_upper_action_smoothness`
+- **新增 10 个 G1-specific reward**:`alive`, `stand_normal`, `not_fly`, `contact`, `feet_distance`, `ankle_pos`, `waist_pos_dof29`, `arm_pos_dof29`, `upper_action_rate`, `upper_action_smoothness`
 - **Motion loader**:JSON (Laikago) → **CSV 36-col**(LAFAN1 风格,纯 torch 自实现 quaternion)
 - **AMP 开关**:无 → **`use_amp` flag**(可关闭 AMP 验证 reward)
 
@@ -53,8 +53,8 @@
 
 ### 3.1 G1 适配(`g1_amp_config.py`)
 - 29 DoF, action_dim=29, num_actions=29
-- prop_dim=72(3+3+3+3+29+29+2)
-- privileged_dim=16(简化版,不含 kp/kd DR)
+- prop_dim=70(3+3+3+3+29+29,无 phantom gait phase)
+- privileged_dim=16(config 值,运行时 auto-fix 到实际 19 = 6 contact_force + 13 contact_flag)
 - PD 增益:hip=200/5, knee=200/5, ankle=100/5, waist=200/5, shoulder=20/0.5, elbow=20/0.5, wrist=5/0.2
 - action_scale=0.5
 - **平面地形**(`mesh_type='plane'`)
@@ -280,9 +280,9 @@ nvidia-smi --query-gpu=memory.used --format=csv,noheader
 
 | 位置 | 状态 | HEAD commit | 推送方向 |
 |---|---|---|---|
-| **本地** `D:\songay\Project_cleanwWMPg1\cleanWMPg1\` | ✅ 已 commit + push | `d08ba49` | ⬆️ **唯一推送点** |
-| **GitHub** `AnthonySung/cleanWMPg1` | ✅ 同步 | `d08ba49` | 接收 ⬅️ / 不接收服务器 push |
-| **服务器** 31310 `/root/cleanWMPg1/` | ✅ 已 git pull | `7b82c72`(旧) | **只 pull,不 push** |
+| **本地** `D:\songay\Project_cleanwWMPg1\cleanWMPg1\` | ✅ 已 commit + push | `4b8c4e9` | ⬆️ **唯一推送点** |
+| **GitHub** `AnthonySung/cleanWMPg1` | ✅ 同步 | `4b8c4e9` | 接收 ⬅️ / 不接收服务器 push |
+| **服务器** 31310 `/root/cleanWMPg1/` | ⚠️ pending pull(网络不稳) | 待 git pull | **只 pull,不 push** |
 
 ### 工作流
 
